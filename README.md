@@ -25,7 +25,7 @@ Provider-neutral personal AI workspace. Connect **several providers at once** (G
 Every push to `main` or the current Arena work branch runs `.github/workflows/build-apk.yml`, which:
 
 1. Installs JDK 21 + the Android SDK packages on the runner (JDK 21 is required by Robolectric 4.16 to emulate SDK 36).
-2. Runs unit tests (`:app:testDebugUnitTest`) and Android lint (`:app:lintDebug`).
+2. Runs blocking unit tests (`:app:testDebugUnitTest`) and attempts Android lint (`:app:lintDebug`); lint is currently diagnostic/non-blocking due to an AGP/KSP toolchain crash and must be fixed before a commercial release.
 3. Builds a **minified, resource-shrunk, signed release APK** (`:app:assembleRelease`).
 4. Verifies the signature with `apksigner` and uploads `Sali-HCNSEC-Release-APK`. A public GitHub Release is created only when a stable `RELEASE_KEYSTORE_BASE64` signing secret is configured; otherwise the APK is a test artifact, not an updateable commercial release.
 
