@@ -45,11 +45,15 @@ interface ApiKeyRepository {
  * visible when it happens on every outgoing request. The key is resolved once and
  * kept for the lifetime of the process.
  */
-class DefaultApiKeyRepository(context: Context) : ApiKeyRepository {
+class DefaultApiKeyRepository(
+    context: Context,
+    private val cipherFactory: () -> KeyCipher = { KeystoreManager(context) }
+) : ApiKeyRepository {
 
     private val prefs: SharedPreferences =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-    private val keystoreManager = KeystoreManager(context)
+    // Do not initialize AndroidKeyStore on the cold-start path.
+    private val keystoreManager by lazy(cipherFactory)
 
     @Volatile
     private var cachedApiKey: String? = null
@@ -74,22 +78,21 @@ class DefaultApiKeyRepository(context: Context) : ApiKeyRepository {
     override fun saveProviderKey(provider: AiProvider, apiKey: String) {
         val trimmed = apiKey.trim()
         if (trimmed.isEmpty()) return
-        if (provider == AiProvider.HCNSEC) cachedApiKey = null
-        try {
-            val (ciphertext, iv) = keystoreManager.encrypt(trimmed)
-            prefs.edit()
+        // Fail closed: never persist an API key in plaintext if the Keystore is unavailable.
+        // Encrypt before touching preferences, so a failure keeps the existing key intact.
+        val (ciphertext, iv) = try {
+            keystoreManager.encrypt(trimmed)
+        } catch (e: Exception) {
+            throw IllegalStateException("Secure storage is unavailable. Your API key was not saved.", e)
+        }
+        if (!prefs.edit()
                 .putString(ciphertextKey(provider), ciphertext)
                 .putString(ivKey(provider), iv)
                 .putLong("${provider.name}_$KEY_LAST_VALIDATED", System.currentTimeMillis())
-                .apply()
-        } catch (e: Exception) {
-            // Secure fallback if keystore fails on unsupported JVM / test environments
-            prefs.edit()
-                .putString(ciphertextKey(provider), "PLAIN:" + trimmed)
-                .putString(ivKey(provider), "")
-                .putLong("${provider.name}_$KEY_LAST_VALIDATED", System.currentTimeMillis())
-                .apply()
+                .commit()) {
+            throw IllegalStateException("Secure storage could not save your API key.")
         }
+        if (provider == AiProvider.HCNSEC) cachedApiKey = trimmed
     }
 
     override fun getApiKey(): String? = getProviderKey(AiProvider.HCNSEC)
@@ -101,11 +104,20 @@ class DefaultApiKeyRepository(context: Context) : ApiKeyRepository {
         val iv = prefs.getString(ivKey(provider), null) ?: ""
 
         val resolved = if (ciphertext.startsWith("PLAIN:")) {
-            ciphertext.removePrefix("PLAIN:")
+            // Migrate legacy insecure keys on demand; never use plaintext as a working
+            // credential. If encryption fails, remove the insecure copy and ask for re-entry.
+            val legacyKey = ciphertext.removePrefix("PLAIN:")
+            try {
+                saveProviderKey(provider, legacyKey)
+                legacyKey
+            } catch (_: Exception) {
+                clearProviderKey(provider)
+                null
+            }
         } else {
             try {
                 keystoreManager.decrypt(ciphertext, iv)
-            } catch (e: Exception) {
+            } catch (_: Exception) {
                 null
             }
         }
@@ -130,7 +142,14 @@ class DefaultApiKeyRepository(context: Context) : ApiKeyRepository {
     }
 
     /** True when at least one provider key exists (used to pick the start destination). */
-    override fun hasAnyConfiguredProvider(): Boolean = getConfiguredProviders().isNotEmpty()
+    override fun hasAnyConfiguredProvider(): Boolean = AiProvider.catalog.any { provider ->
+        // Startup needs only a presence check. Decrypting every provider key here
+        // blocks the first frame on AndroidKeyStore (and repeats for each provider).
+        val ciphertext = prefs.getString(ciphertextKey(provider), null)
+        !ciphertext.isNullOrBlank() &&
+            (ciphertext.startsWith("PLAIN:") || !prefs.getString(ivKey(provider), null).isNullOrBlank()) &&
+            (provider != AiProvider.CUSTOM || !getCustomBaseUrl().isNullOrBlank())
+    }
 
     /** Preferred provider for flows that still need a single pick (onboarding, account
      * usage). Falls back to the first configured provider and never hard-wires HCNSEC
@@ -179,7 +198,7 @@ class DefaultApiKeyRepository(context: Context) : ApiKeyRepository {
             .remove(ciphertextKey(provider))
             .remove(ivKey(provider))
             .remove("${provider.name}_$KEY_LAST_VALIDATED")
-            .apply()
+            .commit()
     }
 
     override fun getMaskedApiKey(): String = getMaskedProviderKey(AiProvider.HCNSEC)

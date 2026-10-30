@@ -10,12 +10,14 @@ import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/**
- * KeystoreManager handles hardware-backed cryptographic operations using AndroidKeyStore.
- * Keys are generated and retained securely inside the Android Keystore provider,
- * and data is encrypted using AES-GCM (256-bit).
- */
-class KeystoreManager(private val context: Context) {
+/** Encryption seam for testing fail-closed storage without a device Keystore. */
+interface KeyCipher {
+    fun encrypt(plaintext: String): Pair<String, String>
+    fun decrypt(encryptedBase64: String, ivBase64: String): String
+}
+
+/** Uses AndroidKeyStore AES-GCM. Hardware backing depends on the device. */
+class KeystoreManager(private val context: Context) : KeyCipher {
 
     companion object {
         private const val ANDROID_KEYSTORE_PROVIDER = "AndroidKeyStore"
@@ -57,7 +59,7 @@ class KeystoreManager(private val context: Context) {
     /**
      * Encrypts plaintext string and returns a pair of (ciphertext Base64, IV Base64)
      */
-    fun encrypt(plaintext: String): Pair<String, String> {
+    override fun encrypt(plaintext: String): Pair<String, String> {
         val secretKey = getOrCreateSecretKey()
         val cipher = Cipher.getInstance(AES_MODE)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey)
@@ -71,7 +73,7 @@ class KeystoreManager(private val context: Context) {
     /**
      * Decrypts ciphertext with IV and returns original plaintext string
      */
-    fun decrypt(encryptedBase64: String, ivBase64: String): String {
+    override fun decrypt(encryptedBase64: String, ivBase64: String): String {
         val secretKey = getOrCreateSecretKey()
         val encryptedBytes = Base64.decode(encryptedBase64, Base64.NO_WRAP)
         val iv = Base64.decode(ivBase64, Base64.NO_WRAP)

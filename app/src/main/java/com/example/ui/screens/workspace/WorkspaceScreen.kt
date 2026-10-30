@@ -33,6 +33,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -58,6 +59,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -110,6 +112,8 @@ fun WorkspaceScreen(
     val versionDiff by viewModel.versionDiff.collectAsState()
     val isComparingVersions by viewModel.isComparingVersions.collectAsState()
     val comparisonError by viewModel.comparisonError.collectAsState()
+    val isApplying by viewModel.isApplying.collectAsState()
+    val derivedVersion by viewModel.derivedVersion.collectAsState()
     val strings = LocalAppStrings.current
 
     var selectedTabIndex by remember { mutableIntStateOf(0) }
@@ -235,7 +239,11 @@ fun WorkspaceScreen(
                         diff = versionDiff,
                         isComparing = isComparingVersions,
                         error = comparisonError,
-                        onCompare = viewModel::compareVersions
+                        onCompare = viewModel::compareVersions,
+                        isApplying = isApplying,
+                        derivedVersion = derivedVersion,
+                        onApply = viewModel::applyReviewedChanges,
+                        onOpenDerived = onOpenInChat
                     )
                 }
             }
@@ -620,7 +628,11 @@ private fun VersionComparisonTab(
     diff: WorkspaceVersionDiff?,
     isComparing: Boolean,
     error: String?,
-    onCompare: (String, String) -> Unit
+    onCompare: (String, String) -> Unit,
+    isApplying: Boolean,
+    derivedVersion: WorkspaceEntity?,
+    onApply: (WorkspaceVersionDiff, Set<String>) -> Unit,
+    onOpenDerived: (String) -> Unit
 ) {
     var leftId by remember(workspaces, currentWorkspaceId) {
         mutableStateOf(currentWorkspaceId ?: workspaces.firstOrNull()?.id.orEmpty())
@@ -630,101 +642,92 @@ private fun VersionComparisonTab(
             ?: workspaces.getOrNull(1)?.id.orEmpty())
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+    val selectedPaths = remember(diff) { mutableStateListOf<String>() }
+    var showApplyConfirm by remember { mutableStateOf(false) }
+    if (showApplyConfirm && diff != null) {
+        AlertDialog(
+            onDismissRequest = { showApplyConfirm = false },
+            title = { Text("Create an unvalidated derived version?") },
+            text = { Text("Copy baseline A and apply ${selectedPaths.size} selected file changes from B. " +
+                "Originals remain untouched. No code is executed and no build or tests are run. " +
+                "Review every selected path before continuing.") },
+            confirmButton = { TextButton(onClick = {
+                showApplyConfirm = false
+                onApply(diff, selectedPaths.toSet())
+            }) { Text("Create derived copy") } },
+            dismissButton = { TextButton(onClick = { showApplyConfirm = false }) { Text("Cancel") } }
+        )
+    }
+    val changes = remember(diff) {
+        if (diff == null) emptyList() else buildList {
+            diff.added.forEach { add("ADDED" to it) }
+            diff.removed.forEach { add("REMOVED" to it) }
+            diff.changed.forEach { add("CHANGED" to it) }
+        }.sortedBy { it.second.relativePath }
+    }
+    LazyColumn(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text(
-            text = "Compare imported project versions",
-            color = TextPrimary,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold
-        )
-        Text(
-            text = "Deterministic SHA-256 comparison. Original ZIP archives and imported versions remain unchanged.",
-            color = TextSecondary,
-            fontSize = 12.sp,
-            lineHeight = 17.sp
-        )
-
-        if (workspaces.size < 2) {
-            Text(
-                text = "Import at least two ZIP versions to compare them.",
-                color = IceCyanLight,
-                fontSize = 13.sp
-            )
-        } else {
-            WorkspaceVersionSelector(
-                label = "Version A / baseline",
-                workspaces = workspaces,
-                selectedId = leftId,
-                onSelected = { leftId = it }
-            )
-            WorkspaceVersionSelector(
-                label = "Version B / comparison",
-                workspaces = workspaces,
-                selectedId = rightId,
-                onSelected = { rightId = it }
-            )
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Compare imported project versions", color = TextPrimary, fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold)
+                Text("Deterministic SHA-256 comparison. Original ZIP archives remain unchanged.",
+                    color = TextSecondary, fontSize = 12.sp)
+                if (workspaces.size < 2) {
+                    Text("Import at least two ZIP versions to compare them.", color = IceCyanLight)
+                } else {
+                    WorkspaceVersionSelector("Version A / baseline", workspaces, leftId) { leftId = it }
+                    WorkspaceVersionSelector("Version B / comparison", workspaces, rightId) { rightId = it }
+                    Button(
+                        onClick = { onCompare(leftId, rightId) },
+                        enabled = !isComparing && !isApplying && leftId.isNotBlank() &&
+                            rightId.isNotBlank() && leftId != rightId,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = VioletPrimary)
+                    ) { Text(if (isComparing) "Comparing files…" else "Compare versions") }
+                }
+                if (!error.isNullOrBlank()) Text(error, color = ErrorRed)
+                diff?.let { result ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        StatBox("Added", result.added.size.toString())
+                        StatBox("Removed", result.removed.size.toString())
+                        StatBox("Changed", result.changed.size.toString())
+                        StatBox("Same", result.unchangedCount.toString())
+                    }
+                    Text("Select paths from version B to apply to a NEW copy of A. No AI guesses or code execution.",
+                        color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+        }
+        items(changes.take(250), key = { it.second.relativePath }) { (kind, change) ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = change.relativePath in selectedPaths,
+                    onCheckedChange = { checked ->
+                        if (checked) selectedPaths.add(change.relativePath)
+                        else selectedPaths.remove(change.relativePath)
+                    }
+                )
+                Box(modifier = Modifier.weight(1f)) { VersionChangeRow(kind, change) }
+            }
+        }
+        if (changes.size > 250) item {
+            Text("Showing the first 250 of ${changes.size} paths; refine the comparison before applying.",
+                color = TextSecondary, fontSize = 12.sp)
+        }
+        if (diff != null) item {
             Button(
-                onClick = { onCompare(leftId, rightId) },
-                enabled = !isComparing && leftId.isNotBlank() && rightId.isNotBlank() && leftId != rightId,
-                modifier = Modifier.fillMaxWidth().height(46.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = VioletPrimary),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                if (isComparing) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        color = Color.White,
-                        strokeWidth = 2.dp
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                Text(if (isComparing) "Comparing files…" else "Compare versions")
-            }
+                onClick = { showApplyConfirm = true },
+                enabled = selectedPaths.isNotEmpty() && !isApplying && !isComparing,
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(if (isApplying) "Creating derived version…" else "Apply selected changes to NEW version") }
         }
-
-        if (!error.isNullOrBlank()) {
-            Text(text = error, color = ErrorRed, fontSize = 12.sp)
-        }
-
-        diff?.let { result ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                StatBox("Added", result.added.size.toString())
-                StatBox("Removed", result.removed.size.toString())
-                StatBox("Changed", result.changed.size.toString())
-                StatBox("Unchanged", result.unchangedCount.toString())
-            }
-            Text(
-                text = "Changed files are based on file-content SHA-256 hashes, not AI guesses or timestamps.",
-                color = TextSecondary,
-                fontSize = 11.sp
-            )
-            val changes = buildList {
-                result.added.forEach { add("ADDED" to it) }
-                result.removed.forEach { add("REMOVED" to it) }
-                result.changed.forEach { add("CHANGED" to it) }
-            }.sortedBy { it.second.relativePath }
-            if (changes.isEmpty()) {
-                Text("No content differences found.", color = IceCyanLight, fontSize = 13.sp)
-            } else {
-                changes.take(250).forEach { (kind, change) ->
-                    VersionChangeRow(kind, change)
-                }
-                if (changes.size > 250) {
-                    Text(
-                        text = "Showing 250 of ${changes.size} changed paths. Exportable full reports can be added next.",
-                        color = TextSecondary,
-                        fontSize = 11.sp
-                    )
-                }
+        derivedVersion?.let { version ->
+            item {
+                Text("Created ${version.name} • UNVALIDATED; no build/tests ran.", color = IceCyanLight)
+                TextButton(onClick = { onOpenDerived(version.id) }) { Text("Open derived version in chat") }
             }
         }
     }

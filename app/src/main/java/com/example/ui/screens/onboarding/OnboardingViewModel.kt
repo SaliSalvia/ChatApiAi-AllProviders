@@ -7,6 +7,8 @@ import com.example.data.api.AiProvider
 import com.example.data.api.HcnsecApiClient
 import com.example.data.repository.ModelRepository
 import com.example.data.security.ApiKeyRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -55,7 +57,12 @@ class OnboardingViewModel(
             result.fold(
                 onSuccess = { models ->
                     // Securely save via Android Keystore
-                    apiKeyRepository.saveProviderKey(provider, key)
+                    try {
+                        withContext(Dispatchers.IO) { apiKeyRepository.saveProviderKey(provider, key) }
+                    } catch (e: IllegalStateException) {
+                        _validationState.value = OnboardingValidationState.Error(e.message ?: "Secure storage unavailable")
+                        return@fold
+                    }
                     // Fetch models from every configured provider to cache
                     modelRepository.refreshModels()
                     _validationState.value = OnboardingValidationState.Success(models.size)

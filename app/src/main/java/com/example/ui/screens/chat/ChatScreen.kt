@@ -34,6 +34,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -67,6 +69,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.api.AiProvider
+import com.example.data.settings.AppLanguage
 import com.example.ui.screens.chat.components.AgentTraceView
 import com.example.ui.screens.chat.components.AttachmentTray
 import com.example.ui.screens.chat.components.ChatInputBar
@@ -124,6 +127,7 @@ fun ChatScreen(
     val workspaces by viewModel.workspaces.collectAsState()
 
     var showModelSheet by remember { mutableStateOf(false) }
+    var showContextConsent by remember { mutableStateOf(false) }
     var showOptionsMenu by remember { mutableStateOf(false) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
 
@@ -505,12 +509,54 @@ fun ChatScreen(
                     onOpenModelSelector = { showModelSheet = true },
                     onAttachFile = { genericFileLauncher.launch("*/*") },
                     onAttachZip = { zipLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")) },
-                    onSend = { viewModel.sendMessage() },
+                    onSend = {
+                        if (attachments.isNotEmpty() || activeWorkspaceId != null) {
+                            showContextConsent = true
+                        } else viewModel.sendMessage()
+                    },
                     onStop = { viewModel.stopGeneration() },
                     hasAttachments = attachments.isNotEmpty()
                 )
             }
         }
+    }
+
+    // Consent before sending extracted project/file context to an external API.
+    if (showContextConsent) {
+        val names = attachments.filter { !it.isZipWorkspace }.map { it.name }
+        val versions = attachments.count { it.isZipWorkspace } +
+            (if (activeWorkspaceId != null && attachments.none { it.workspaceId == activeWorkspaceId }) 1 else 0)
+        val persian = strings.language == AppLanguage.PERSIAN
+        AlertDialog(
+            onDismissRequest = { showContextConsent = false },
+            title = { Text(if (persian) "ارسال محتوای پروژه به هوش مصنوعی؟" else "Send project context to AI?") },
+            text = {
+                Text(if (persian) {
+                    "مدل/ارائه‌دهنده: $selectedModelDisplay\n" +
+                        "نسخه‌های پروژه: $versions؛ فایل‌های پیوست: ${names.joinToString().ifBlank { "هیچ" }}\n\n" +
+                        "فقط بخش‌های استخراج‌شده و محدود ارسال می‌شوند، نه ZIP اصلی. " +
+                        "فایل‌های شناخته‌شدهٔ حاوی اطلاعات محرمانه حذف و الگوهای رایج مخفی می‌شوند، " +
+                        "ولی تشخیص خودکار قطعی نیست. پیش از ادامه فایل‌ها را بررسی کنید. " +
+                        "در حالت خودکار، ارائه‌دهنده هنگام ارسال انتخاب می‌شود."
+                } else {
+                    "Provider/model: $selectedModelDisplay\n" +
+                        "Project versions: $versions; attached files: ${names.joinToString().ifBlank { "none" }}\n\n" +
+                        "Only bounded extracted excerpts, not the original ZIPs, are sent. " +
+                        "Known credential files are excluded and common secret patterns redacted, " +
+                        "but automatic detection is not guaranteed. Review your files before continuing. " +
+                        "In Auto mode the provider is selected when you send."
+                })
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showContextConsent = false
+                    viewModel.sendMessage()
+                }) { Text(if (persian) "ارسال" else "Send to provider") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showContextConsent = false }) { Text(if (persian) "انصراف" else "Cancel") }
+            }
+        )
     }
 
     // Model Selector Bottom Sheet

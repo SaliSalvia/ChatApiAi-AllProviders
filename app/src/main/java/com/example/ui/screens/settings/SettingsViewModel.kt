@@ -9,6 +9,8 @@ import com.example.data.api.UserBalanceDto
 import com.example.data.repository.ModelRepository
 import com.example.data.security.ApiKeyRepository
 import com.example.domain.model.AiModel
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -74,7 +76,12 @@ class SettingsViewModel(
             val result = apiClient.validateApiKey(detectedProvider, key)
             result.fold(
                 onSuccess = {
-                    apiKeyRepository.saveProviderKey(detectedProvider, key)
+                    try {
+                        withContext(Dispatchers.IO) { apiKeyRepository.saveProviderKey(detectedProvider, key) }
+                    } catch (e: IllegalStateException) {
+                        onError(e.message ?: "Secure storage unavailable")
+                        return@fold
+                    }
                     refreshConfigured()
                     modelRepository.refreshModels()
                     onSuccess(detectedProvider)

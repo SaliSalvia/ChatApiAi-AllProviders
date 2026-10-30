@@ -74,6 +74,34 @@ class WorkspaceRepository(
             zipWorkspaceManager.compareWorkspaces(leftWorkspaceId, rightWorkspaceId)
         }
 
+    /** Applies reviewed file-level changes into a new local version; originals stay intact. */
+    suspend fun createDerivedWorkspace(
+        baselineId: String,
+        sourceId: String,
+        diff: WorkspaceVersionDiff,
+        paths: Set<String>
+    ): WorkspaceEntity = withContext(Dispatchers.IO) {
+        require(workspaceDao.getWorkspaceById(baselineId) != null &&
+            workspaceDao.getWorkspaceById(sourceId) != null) { "Source versions no longer exist" }
+        val summary = zipWorkspaceManager.createDerivedWorkspace(baselineId, sourceId, paths, diff)
+        val entity = WorkspaceEntity(
+            id = summary.workspaceId,
+            name = "Derived • ${summary.workspaceId.take(8)}",
+            rootPath = summary.workspaceId,
+            projectType = summary.projectType,
+            fileCount = summary.totalFiles,
+            totalSizeBytes = summary.totalSizeBytes,
+            summary = summary.structureOverview
+        )
+        try {
+            workspaceDao.insert(entity)
+            entity
+        } catch (error: Exception) {
+            zipWorkspaceManager.deleteWorkspace(summary.workspaceId)
+            throw error
+        }
+    }
+
     /** Creates a single archive containing the selected project versions. */
     suspend fun exportWorkspaces(workspaceIds: List<String>, archiveName: String): File = withContext(Dispatchers.IO) {
         zipWorkspaceManager.exportWorkspaces(workspaceIds, archiveName)

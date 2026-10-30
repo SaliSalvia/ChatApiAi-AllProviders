@@ -42,6 +42,29 @@ class WorkspaceViewModel(
     private val _comparisonError = MutableStateFlow<String?>(null)
     val comparisonError = _comparisonError.asStateFlow()
 
+    private val _isApplying = MutableStateFlow(false)
+    val isApplying = _isApplying.asStateFlow()
+    private val _derivedVersion = MutableStateFlow<WorkspaceEntity?>(null)
+    val derivedVersion = _derivedVersion.asStateFlow()
+
+    fun applyReviewedChanges(diff: WorkspaceVersionDiff, paths: Set<String>) {
+        if (_isApplying.value || paths.isEmpty() || diff != _versionDiff.value) return
+        viewModelScope.launch {
+            _isApplying.value = true
+            _comparisonError.value = null
+            _derivedVersion.value = null
+            try {
+                _derivedVersion.value = workspaceRepository.createDerivedWorkspace(
+                    diff.leftWorkspaceId, diff.rightWorkspaceId, diff, paths
+                )
+            } catch (error: Exception) {
+                _comparisonError.value = error.message ?: "Could not create derived version"
+            } finally {
+                _isApplying.value = false
+            }
+        }
+    }
+
     fun compareVersions(leftWorkspaceId: String, rightWorkspaceId: String) {
         if (leftWorkspaceId == rightWorkspaceId) {
             _comparisonError.value = "Choose two different project versions."
@@ -52,6 +75,7 @@ class WorkspaceViewModel(
             _isComparingVersions.value = true
             _comparisonError.value = null
             _versionDiff.value = null
+            _derivedVersion.value = null
             try {
                 _versionDiff.value = workspaceRepository.compareWorkspaces(leftWorkspaceId, rightWorkspaceId)
             } catch (error: Exception) {
