@@ -28,25 +28,26 @@ Provider-neutral personal AI workspace. Connect **several providers at once** (G
 - **Aggregated, hierarchical model picker:** Models are loaded from every configured provider's `/models` endpoint, tagged with their provider, and shown in a provider → model dropdown. Manual model IDs remain available for endpoints without a catalog.
 - **Best-model auto routing across providers:** In auto mode the agent classifies each request and picks the strongest model from any connected API, then streams through the provider that owns it.
 - **Reasoning Process Display:** Collapsible visual accordion for DeepSeek-R1 / HCNSEC reasoning tokens (`reasoning_content`).
+- **Reviewable derived versions:** Compare two versions with deterministic SHA-256 file changes, select individual added/removed/changed paths, confirm the plan, and create a separate **unvalidated** derived workspace. Original archives and imported versions are never overwritten; this action does not run a build or tests.
+- **Remote context consent:** Before sharing extracted project context, the app shows a confirmation, omits known credential-file paths, and redacts common inline secrets. This filtering is best effort, not a guarantee; users should review projects before sending.
 - **Durable ZIP Workspace & Deep Analysis:** Every accepted ZIP is copied into app-private storage, indexed as an independent project version, protected with Zip Slip/size limits, and fingerprinted with SHA-256. The provider that owns the selected model receives a bounded, labelled deep-analysis context containing the project tree, summaries, code, Markdown, PDF and DOCX extracts when you explicitly ask for analysis; the original archive remains reusable offline until deleted.
-- **Hardware-Backed KeyStore Security:** User API keys for every provider are securely encrypted on-device with AES-GCM and Android Keystore. API keys are never bundled in the APK or sent to a different provider than the one selected.
+- **Android KeyStore Security:** User API keys for every provider are securely encrypted on-device with AES-GCM and Android Keystore (hardware backing depends on device support). API keys are never bundled in the APK or sent to a different provider than the one selected.
 - **Bilingual UI (EN / فارسی):** A dependency-free localization layer switches the whole interface, with automatic RTL layout, from Settings.
-- **Zero-Bug Material 3 Design:** Edge-to-edge support, custom dark theme (`#0B0C10`, `#14151F`, `#8B5CF6`), and smooth auto-scrolling.
+- **Material 3 Design:** Edge-to-edge support, custom dark theme (`#0B0C10`, `#14151F`, `#8B5CF6`), and smooth auto-scrolling.
 
 ---
 
 ## 🚀 Building the APK
 
 ### Method 1: Automatic GitHub Actions (recommended)
-Every push to `main` or `arena/01a0abb1-personal-ai-hcn` runs `.github/workflows/build-apk.yml`, which:
+Every push to `main` or the current Arena work branch runs `.github/workflows/build-apk.yml`, which:
 
 1. Installs JDK 21 + the Android SDK packages on the runner (JDK 21 is required by Robolectric 4.16 to emulate SDK 36).
-2. Runs the unit tests (`:app:testDebugUnitTest`).
+2. Runs blocking unit tests (`:app:testDebugUnitTest`) and attempts Android lint (`:app:lintDebug`); lint is currently diagnostic/non-blocking due to an AGP/KSP toolchain crash and must be fixed before a commercial release.
 3. Builds a **minified, resource-shrunk, signed release APK** (`:app:assembleRelease`).
-4. Verifies the signature with `apksigner` and uploads `Sali-HCNSEC-Release-APK`.
+4. Verifies the signature with `apksigner` and uploads `Sali-HCNSEC-Release-APK`. A public GitHub Release is created only when a stable `RELEASE_KEYSTORE_BASE64` signing secret is configured; otherwise the APK is a test artifact, not an updateable commercial release.
 
-Download `app-release.apk` from the **Actions** tab (artifact) or from the GitHub
-**Release** that the workflow publishes. Each release note carries the build report
+Download `app-release.apk` from the **Actions** tab (artifact), or from a GitHub **Release** when stable signing is configured. Each release note carries the build report
 for that run: commit, APK size, SHA-256, signature, R8 keep-rule check, the test
 results and the tail of the release build log.
 
@@ -92,4 +93,4 @@ The catalog provides connection profiles, not free credits. Each provider contro
 
 All provider keys are entered by the user in the app and stored locally. The app does not proxy requests through a third-party server. For custom endpoints, use HTTPS and include the API's version path (usually `/v1`). Uploaded ZIPs are retained only in the app's private storage and are not silently uploaded or permanently stored by an AI provider; each requested analysis sends only the bounded extracted context to the provider that owns the selected model.
 
-# Build outputs are published as a GitHub Release asset plus a git blob.
+# Stable-signed builds can be published as a GitHub Release asset plus a git blob.

@@ -16,6 +16,7 @@ import com.example.domain.model.TraceStep
 import com.example.domain.model.TraceStepStatus
 import com.example.domain.router.AutoModelRouter
 import com.example.data.security.ApiKeyRepository
+import com.example.data.security.RemoteContextGuard
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -188,9 +189,9 @@ class ChatRepository(
 
         // Attached text/document files
         for (att in attachments) {
-            if (!att.extractedText.isNullOrBlank()) {
+            if (!att.extractedText.isNullOrBlank() && !RemoteContextGuard.isSensitivePath(att.name)) {
                 additionalContext.append("\n\n--- ATTACHED FILE: ${att.name} ---\n")
-                additionalContext.append(att.extractedText.take(10_000))
+                additionalContext.append(RemoteContextGuard.redact(att.extractedText.take(10_000)))
                 additionalContext.append("\n")
             }
         }

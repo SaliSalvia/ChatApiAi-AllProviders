@@ -4,6 +4,7 @@ import android.content.Context
 import com.example.domain.model.FileChunk
 import com.example.domain.model.WorkspaceFileInfo
 import com.example.domain.model.WorkspaceSummary
+import com.example.data.security.RemoteContextGuard
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
@@ -369,42 +370,31 @@ class ZipWorkspaceManager(private val context: Context) {
 
         val chunks = mutableListOf<FileChunk>()
 
-        workspaceRoot.walkTopDown()
-            .filter { file ->
-                !file.isDirectory &&
-                        file.extension.lowercase() in CODE_EXTENSIONS &&
-                        !file.relativeTo(workspaceRoot).path.split(File.separator).any { it in IGNORED_DIRECTORIES }
-            }
-            .forEach { file ->
-                if (chunks.size >= maxTotalChunks) return@forEach
-
-                try {
-                    val content = readTextLikeFile(file)
-                    val relPath = file.relativeTo(workspaceRoot).path
-
-                    // Score relevance
-                    val matchesQuery = queryTerms.any { term ->
-                        relPath.lowercase().contains(term) || content.lowercase().contains(term)
+        // Stream candidates and stop as soon as the context budget is full.
+        // Avoid decoding large files or known credential files on the request path.
+        for (file in workspaceRoot.walkTopDown().filter { candidate ->
+            candidate.isFile && candidate.length() <= 2L * 1024 * 1024 &&
+                candidate.extension.lowercase() in CODE_EXTENSIONS &&
+                !candidate.relativeTo(workspaceRoot).invariantSeparatorsPath.split('/').any { it in IGNORED_DIRECTORIES } &&
+                !RemoteContextGuard.isSensitivePath(candidate.relativeTo(workspaceRoot).invariantSeparatorsPath)
+        }) {
+            if (chunks.size >= maxTotalChunks) break
+            try {
+                val relPath = file.relativeTo(workspaceRoot).invariantSeparatorsPath
+                val content = RemoteContextGuard.redact(readTextLikeFile(file))
+                val matchesQuery = queryTerms.any { term ->
+                    relPath.lowercase().contains(term) || content.contains(term, ignoreCase = true)
+                }
+                val isDocumentation = file.extension.lowercase() in setOf("md", "docx", "pdf")
+                if (matchesQuery || isKeyProjectFile(file.name) || isDocumentation) {
+                    val fileChunks = chunkString(content, CHUNK_SIZE_CHARS)
+                    for (i in fileChunks.indices) {
+                        if (chunks.size >= maxTotalChunks) break
+                        chunks.add(FileChunk(relPath, i + 1, fileChunks.size, fileChunks[i]))
                     }
-
-                    val isDocumentation = file.extension.lowercase() in setOf("md", "docx", "pdf")
-                    if (matchesQuery || isKeyProjectFile(file.name) || isDocumentation) {
-                        val fileChunks = chunkString(content, CHUNK_SIZE_CHARS)
-                        for (i in fileChunks.indices) {
-                            if (chunks.size < maxTotalChunks) {
-                                chunks.add(
-                                    FileChunk(
-                                        filePath = relPath,
-                                        chunkIndex = i + 1,
-                                        totalChunks = fileChunks.size,
-                                        content = fileChunks[i]
-                                    )
-                                )
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
+                }
+            } catch (_: Exception) { /* Unreadable files do not block other candidates. */ }
+        }
 
         return chunks
     }
@@ -449,6 +439,7 @@ class ZipWorkspaceManager(private val context: Context) {
         val output = StringBuilder("--- PROJECT LAB: FAIR MULTI-VERSION CONTEXT ---\n")
         output.append("Candidates requested: ${workspaceIds.distinct().size}; candidates analyzed: ${versions.size}; maximum supported: 20.\n")
         output.append("Evidence excerpts are budgeted per candidate. A missing excerpt is not evidence that a file or feature is absent.\n")
+        output.append("Coverage limits: only selected excerpts are transmitted; files over 2 MiB and recognized credential files are excluded. Some secrets may evade detection. No tests/builds ran as part of this analysis.\n")
 
         // First include concise metadata for every candidate, independent of source excerpt budget.
         versions.forEach { version ->
@@ -559,6 +550,37 @@ class ZipWorkspaceManager(private val context: Context) {
             rightWorkspaceId = rightWorkspaceId,
             rightRoot = File(workspacesDir, rightWorkspaceId)
         )
+
+    /** Creates an isolated, unvalidated derived version. The caller persists its Room row. */
+    fun createDerivedWorkspace(
+        baselineId: String,
+        sourceId: String,
+        selectedPaths: Set<String>,
+        expectedDiff: com.example.domain.model.WorkspaceVersionDiff
+    ): WorkspaceSummary {
+        require(baselineId != sourceId && baselineId == expectedDiff.leftWorkspaceId &&
+            sourceId == expectedDiff.rightWorkspaceId) { "Review these exact versions again" }
+        // Re-compare before copying: a stale UI plan must never silently apply to
+        // a different snapshot. UUIDs are trusted only after this comparison.
+        val current = compareWorkspaces(baselineId, sourceId)
+        require(current == expectedDiff) { "Source versions changed; compare again before applying" }
+        val id = UUID.randomUUID().toString()
+        val destination = File(workspacesDir, id)
+        val baseline = File(workspacesDir, baselineId)
+        val source = File(workspacesDir, sourceId)
+        val available = MAX_TOTAL_PROJECT_LAB_BYTES - calculateStoredProjectBytes(excludingWorkspaceId = id)
+        require(available > 0) { "Not enough local storage for a derived workspace" }
+        WorkspaceMergeEngine(available).apply(baseline, source, destination, current, selectedPaths)
+        return try {
+            analyzeWorkspace(id, destination, "Derived version of $baselineId").copy(
+                structureOverview = "UNVALIDATED derived workspace. Baseline: $baselineId; source: $sourceId; " +
+                    "approved paths: ${selectedPaths.sorted().joinToString()}. No build or tests were run."
+            )
+        } catch (error: Exception) {
+            destination.deleteRecursively()
+            throw error
+        }
+    }
 
     private fun ByteArray.toHexString(): String = joinToString("") { byte -> "%02x".format(byte) }
 
