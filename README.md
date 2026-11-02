@@ -93,4 +93,14 @@ The catalog provides connection profiles, not free credits. Each provider contro
 
 All provider keys are entered by the user in the app and stored locally. The app does not proxy requests through a third-party server. For custom endpoints, use HTTPS and include the API's version path (usually `/v1`). Uploaded ZIPs are retained only in the app's private storage and are not silently uploaded or permanently stored by an AI provider; each requested analysis sends only the bounded extracted context to the provider that owns the selected model.
 
-# Stable-signed builds can be published as a GitHub Release asset plus a git blob.
+## 📚 Documentation
+
+| Document | Contents |
+| --- | --- |
+| [Product Quality Roadmap](docs/PRODUCT_QUALITY_ROADMAP.md) | Product principles, workflow, and engineering workstreams (P0–P3) |
+| [Product Readiness Scorecard](docs/PRODUCT_READINESS_SCORECARD.md) | Current readiness assessment and the 30/60/90-day plan to production + global |
+| [Onboarding Spec](docs/UX_ONBOARDING_SPEC.md) | First-run UX: welcome → privacy notice → provider setup → first success |
+| [Localization Guide](docs/LOCALIZATION.md) | How the dependency-free EN/FA layer works and how to add languages |
+| [Release Checklist](docs/RELEASE_CHECKLIST.md) | Reproducible release readiness checklist |
+| [Privacy Policy](PRIVACY.md) · [Terms](TERMS.md) · [Security Policy](SECURITY.md) | Legal and security policies (store-ready) |
+| [Contributing](CONTRIBUTING.md) | Setup, ground rules, PR and testing expectations |
