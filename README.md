@@ -1,3 +1,21 @@
+```text
+ ███   ███  █      ███  ████
+█   █ █   █ █     █   █ █   █
+█     █   █ █     █   █ █   █
+ ███  █████ █     █████ ████
+    █ █   █ █     █   █ █ █
+█   █ █   █ █     █   █ █  █
+ ███  █   █ █████ █   █ █   █
+
+ ▓▓▓   ▓▓▓  ▓     ▓   ▓ ▓▓▓  ▓▓▓
+▓   ▓ ▓   ▓ ▓     ▓   ▓  ▓  ▓   ▓
+▓     ▓   ▓ ▓     ▓   ▓  ▓  ▓   ▓
+ ▓▓▓  ▓▓▓▓▓ ▓     ▓   ▓  ▓  ▓▓▓▓▓
+    ▓ ▓   ▓ ▓     ▓   ▓  ▓  ▓   ▓
+▓   ▓ ▓   ▓ ▓      ▓ ▓   ▓  ▓   ▓
+ ▓▓▓  ▓   ▓ ▓▓▓▓▓   ▓   ▓▓▓ ▓   ▓
+```
+
 # SALi-HCNSEC
 
 Provider-neutral personal AI workspace. Connect **several providers at once** (Google AI Studio, HCNSEC, Groq, OpenRouter, and more) and use **all of their models** from one agent. Built with modern Android, Jetpack Compose, Kotlin Coroutines & Flow, and Android KeyStore security.
