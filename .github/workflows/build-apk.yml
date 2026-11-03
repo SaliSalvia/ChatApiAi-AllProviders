@@ -2,7 +2,7 @@ name: Build Android APK
 
 on:
   push:
-    branches: ["main", "master", "arena/f003f3ad-personal-ai-hcn"]
+    branches: ["main", "master", "arena/**"]
   pull_request:
     branches: ["main", "master"]
   workflow_dispatch:
