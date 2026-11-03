@@ -109,6 +109,66 @@ class WorkspaceMultiVersionTest {
         assertTrue("Ambiguous normalized path must be rejected", result.isFailure)
     }
 
+    @Test
+    fun invalidOrTruncatedZipLeavesNoWorkspaceOrArchive() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = ZipWorkspaceManager(context)
+        val roots = File(context.filesDir, "sali_workspaces")
+        val archives = File(context.filesDir, "sali_archives")
+        val beforeRoots = roots.listFiles().orEmpty().map { it.name }.toSet()
+        val beforeArchives = archives.listFiles().orEmpty().map { it.name }.toSet()
+        val zipBytes = ByteArrayOutputStream().also { output ->
+            ZipOutputStream(output).use { zip -> add(zip, "README.md", "test") }
+        }.toByteArray()
+        listOf("not a zip".toByteArray(), zipBytes.copyOf(zipBytes.size - 16)).forEach { bad ->
+            assertTrue(manager.extractZipToWorkspace(bad.inputStream(), "bad.zip").isFailure)
+        }
+        assertTrue(beforeRoots == roots.listFiles().orEmpty().map { it.name }.toSet())
+        assertTrue(beforeArchives == archives.listFiles().orEmpty().map { it.name }.toSet())
+    }
+
+    @Test
+    fun excessivelyDeepEntryIsRejectedBeforeFileTreeCanOverflow() = runBlocking {
+        val manager = ZipWorkspaceManager(ApplicationProvider.getApplicationContext<Context>())
+        val zip = ByteArrayOutputStream().also { output ->
+            ZipOutputStream(output).use { archive ->
+                add(archive, (1..65).joinToString("/") { "d" } + "/src.kt", "code")
+            }
+        }
+        assertTrue(manager.extractZipToWorkspace(zip.toByteArray().inputStream(), "deep.zip").isFailure)
+    }
+
+    @Test
+    fun contextRanksRelevantFilesAndOmitsCredentialFiles() = runBlocking {
+        val manager = ZipWorkspaceManager(ApplicationProvider.getApplicationContext<Context>())
+        val zip = ByteArrayOutputStream().also { output ->
+            ZipOutputStream(output).use { archive ->
+                repeat(140) { add(archive, "a/filler$it.kt", "fun irrelevant$it() = Unit") }
+                add(archive, "z/payment-api.kt", "fun paymentApi() = \"payment evidence\"")
+                add(archive, ".env", "OPENAI_API_KEY=never-send-me")
+                add(archive, "z/credentials.json", "{\"secret\":\"never-send-me\"}")
+            }
+        }
+        val version = manager.extractZipToWorkspace(zip.toByteArray().inputStream(), "ranking.zip").getOrThrow()
+        val chunks = manager.getRelevantWorkspaceChunks(version.workspaceId, "payment", 3)
+        assertTrue(chunks.any { it.filePath == "z/payment-api.kt" && "payment evidence" in it.content })
+        assertTrue(chunks.none { "never-send-me" in it.content })
+    }
+
+    @Test
+    fun exportCannotEscapeCacheAndCleansPartialFileOnFailure() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val manager = ZipWorkspaceManager(context)
+        val version = manager.extractZipToWorkspace(smallVersionZip(1), "export.zip").getOrThrow()
+        val exported = manager.exportWorkspaces(listOf(version.workspaceId), "../../outside")
+        assertTrue(exported.canonicalFile.toPath().startsWith(context.cacheDir.canonicalFile.toPath()))
+        assertTrue(exported.isFile)
+        exported.delete()
+        val before = context.cacheDir.listFiles().orEmpty().map { it.name }.toSet()
+        assertTrue(runCatching { manager.exportWorkspaces(listOf("../outside"), "unsafe") }.isFailure)
+        assertTrue(before == context.cacheDir.listFiles().orEmpty().map { it.name }.toSet())
+    }
+
     private fun smallVersionZip(index: Int): java.io.InputStream {
         val output = ByteArrayOutputStream()
         ZipOutputStream(output).use { zip ->

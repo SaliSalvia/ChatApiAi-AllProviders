@@ -8,7 +8,10 @@ import com.example.data.security.RemoteContextGuard
 import com.tom_roush.pdfbox.android.PDFBoxResourceLoader
 import com.tom_roush.pdfbox.pdmodel.PDDocument
 import com.tom_roush.pdfbox.text.PDFTextStripper
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -17,6 +20,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
+import java.util.zip.ZipFile
 import java.util.zip.ZipOutputStream
 
 class ZipWorkspaceManager(private val context: Context) {
@@ -66,12 +70,7 @@ class ZipWorkspaceManager(private val context: Context) {
         val workspaceId = UUID.randomUUID().toString()
         val destDir = File(workspacesDir, workspaceId)
         val archiveFile = File(archivesDir, "$workspaceId.zip")
-        if (!destDir.mkdirs()) {
-            return@withContext Result.failure(Exception("Failed to create workspace directory"))
-        }
-
-        val canonicalDestDirPath = destDir.canonicalPath + File.separator
-        val existingStoredBytes = calculateStoredProjectBytes(excludingWorkspaceId = workspaceId)
+        val importContext = currentCoroutineContext()
         var totalBytesExtracted = 0L
         var totalEntries = 0
         var archiveBytes = 0L
@@ -80,11 +79,15 @@ class ZipWorkspaceManager(private val context: Context) {
         val seenEntryNames = mutableSetOf<String>()
 
         try {
+            val existingStoredBytes = calculateStoredProjectBytes(excludingWorkspaceId = workspaceId)
+            if (!destDir.mkdirs()) throw java.io.IOException("Failed to create workspace directory")
+            val canonicalDestDirPath = destDir.canonicalPath + File.separator
             val digest = MessageDigest.getInstance("SHA-256")
             archiveFile.outputStream().buffered().use { output ->
                 val buffer = ByteArray(8192)
                 var read: Int
                 while (inputStream.read(buffer).also { read = it } != -1) {
+                    importContext.ensureActive()
                     archiveBytes += read
                     if (archiveBytes > MAX_COMPRESSED_ARCHIVE_BYTES) {
                         throw SecurityException("ZIP archive exceeds maximum upload size ($MAX_COMPRESSED_ARCHIVE_BYTES bytes)")
@@ -98,9 +101,18 @@ class ZipWorkspaceManager(private val context: Context) {
             }
             val archiveSha256 = digest.digest().toHexString()
 
+            // ZipInputStream alone accepts arbitrary bytes as an empty archive and
+            // does not verify that the central directory exists (truncated ZIPs).
+            val expectedEntries = ZipFile(archiveFile).use { zip ->
+                if (zip.size() == 0) throw java.util.zip.ZipException("ZIP contains no entries")
+                if (zip.size() > MAX_ENTRIES_COUNT) throw SecurityException("ZIP contains too many entries")
+                zip.size()
+            }
+
             ZipInputStream(FileInputStream(archiveFile)).use { zis ->
                 var entry: ZipEntry? = zis.nextEntry
                 while (entry != null) {
+                    importContext.ensureActive()
                     totalEntries++
                     if (totalEntries > MAX_ENTRIES_COUNT) {
                         throw SecurityException("ZIP archive contains too many entries (exceeds $MAX_ENTRIES_COUNT)")
@@ -110,7 +122,8 @@ class ZipWorkspaceManager(private val context: Context) {
                     // drive-prefixed paths, NULs, traversal segments, and duplicate entries.
                     val normalizedName = entry.name.replace('\\', '/')
                     val pathSegments = normalizedName.split('/')
-                    if (normalizedName.isBlank() ||
+                    if (normalizedName.length > 512 || pathSegments.size > 64 ||
+                        normalizedName.isBlank() ||
                         normalizedName.startsWith('/') ||
                         normalizedName.contains("//") ||
                         Regex("^[A-Za-z]:").containsMatchIn(normalizedName) ||
@@ -142,6 +155,7 @@ class ZipWorkspaceManager(private val context: Context) {
                             val buffer = ByteArray(8192)
                             var len: Int
                             while (zis.read(buffer).also { len = it } != -1) {
+                                importContext.ensureActive()
                                 entryBytes += len
                                 totalBytesExtracted += len
 
@@ -176,6 +190,10 @@ class ZipWorkspaceManager(private val context: Context) {
                 }
             }
 
+            if (totalEntries != expectedEntries) {
+                throw java.util.zip.ZipException("ZIP local entries differ from its central directory")
+            }
+            importContext.ensureActive()
             // Analyze extracted workspace. The archive metadata is retained so the
             // original upload can be reused/exported and its integrity can be checked.
             val summary = analyzeWorkspace(workspaceId, destDir, workspaceName).copy(
@@ -184,9 +202,11 @@ class ZipWorkspaceManager(private val context: Context) {
             )
             Result.success(summary)
         } catch (e: Exception) {
-            // Clean up partially extracted files on failure, including the durable copy.
+            // Cancellation must propagate to callers; never turn it into a normal
+            // Result.failure while leaving an apparently successful import job.
             destDir.deleteRecursively()
             archiveFile.delete()
+            if (e is CancellationException) throw e
             Result.failure(e)
         }
     }
@@ -363,39 +383,53 @@ class ZipWorkspaceManager(private val context: Context) {
         maxTotalChunks: Int = 5
     ): List<FileChunk> {
         val workspaceRoot = File(workspacesDir, workspaceId)
-        if (!workspaceRoot.exists()) return emptyList()
+        if (!workspaceRoot.isDirectory || maxTotalChunks <= 0) return emptyList()
 
         val queryTerms = userQuery.lowercase().split(" ", ",", ".", "_", "-", "/", "\\")
-            .filter { it.length >= 3 }
-
+            .filter { it.length >= 3 }.distinct().take(16)
+        // Rank paths before decoding file contents. This prevents large irrelevant
+        // files early in a ZIP from consuming the whole mobile CPU/context budget.
+        val candidates = workspaceRoot.walkTopDown().onEnter { dir ->
+            dir == workspaceRoot || dir.name !in IGNORED_DIRECTORIES
+        }.filter { file ->
+            file.isFile && file.length() <= 2L * 1024 * 1024 &&
+                file.extension.lowercase() in CODE_EXTENSIONS &&
+                !RemoteContextGuard.isSensitivePath(file.relativeTo(workspaceRoot).invariantSeparatorsPath)
+        }.toList().sortedWith(
+            compareByDescending<File> { file ->
+                val path = file.relativeTo(workspaceRoot).invariantSeparatorsPath.lowercase()
+                when {
+                    queryTerms.any { it in path } -> 3
+                    isKeyProjectFile(file.name) -> 2
+                    file.extension.lowercase() in setOf("md", "docx", "pdf") -> 1
+                    else -> 0
+                }
+            }.thenBy { it.relativeTo(workspaceRoot).invariantSeparatorsPath }
+        )
         val chunks = mutableListOf<FileChunk>()
-
-        // Stream candidates and stop as soon as the context budget is full.
-        // Avoid decoding large files or known credential files on the request path.
-        for (file in workspaceRoot.walkTopDown().filter { candidate ->
-            candidate.isFile && candidate.length() <= 2L * 1024 * 1024 &&
-                candidate.extension.lowercase() in CODE_EXTENSIONS &&
-                !candidate.relativeTo(workspaceRoot).invariantSeparatorsPath.split('/').any { it in IGNORED_DIRECTORIES } &&
-                !RemoteContextGuard.isSensitivePath(candidate.relativeTo(workspaceRoot).invariantSeparatorsPath)
-        }) {
+        // A hard read budget makes the worst-case cost predictable. The prompt
+        // explicitly discloses that these excerpts are not exhaustive.
+        for (file in candidates.take(128)) {
             if (chunks.size >= maxTotalChunks) break
             try {
                 val relPath = file.relativeTo(workspaceRoot).invariantSeparatorsPath
-                val content = RemoteContextGuard.redact(readTextLikeFile(file))
-                val matchesQuery = queryTerms.any { term ->
-                    relPath.lowercase().contains(term) || content.contains(term, ignoreCase = true)
-                }
-                val isDocumentation = file.extension.lowercase() in setOf("md", "docx", "pdf")
-                if (matchesQuery || isKeyProjectFile(file.name) || isDocumentation) {
-                    val fileChunks = chunkString(content, CHUNK_SIZE_CHARS)
-                    for (i in fileChunks.indices) {
-                        if (chunks.size >= maxTotalChunks) break
-                        chunks.add(FileChunk(relPath, i + 1, fileChunks.size, fileChunks[i]))
+                val content = readTextLikeFile(file)
+                if ('\u0000' in content) continue // Binary masquerading as source code.
+                val relevant = isKeyProjectFile(file.name) ||
+                    file.extension.lowercase() in setOf("md", "docx", "pdf") ||
+                    queryTerms.any { term ->
+                        relPath.contains(term, ignoreCase = true) || content.contains(term, ignoreCase = true)
                     }
+                if (!relevant) continue
+                val safeContent = RemoteContextGuard.redact(content)
+                val fileChunks = chunkString(safeContent, CHUNK_SIZE_CHARS)
+                // Do not let one file eclipse other evidence in the same version.
+                for (index in 0 until minOf(fileChunks.size, 2)) {
+                    if (chunks.size >= maxTotalChunks) break
+                    chunks.add(FileChunk(relPath, index + 1, fileChunks.size, fileChunks[index]))
                 }
             } catch (_: Exception) { /* Unreadable files do not block other candidates. */ }
         }
-
         return chunks
     }
 
@@ -439,7 +473,7 @@ class ZipWorkspaceManager(private val context: Context) {
         val output = StringBuilder("--- PROJECT LAB: FAIR MULTI-VERSION CONTEXT ---\n")
         output.append("Candidates requested: ${workspaceIds.distinct().size}; candidates analyzed: ${versions.size}; maximum supported: 20.\n")
         output.append("Evidence excerpts are budgeted per candidate. A missing excerpt is not evidence that a file or feature is absent.\n")
-        output.append("Coverage limits: only selected excerpts are transmitted; files over 2 MiB and recognized credential files are excluded. Some secrets may evade detection. No tests/builds ran as part of this analysis.\n")
+        output.append("Coverage limits: only selected excerpts are transmitted; files over 2 MiB and recognized credential files are excluded; at most 128 eligible files are read per version. Some secrets may evade detection. No tests/builds ran as part of this analysis.\n")
 
         // First include concise metadata for every candidate, independent of source excerpt budget.
         versions.forEach { version ->
@@ -502,7 +536,7 @@ class ZipWorkspaceManager(private val context: Context) {
             }
             document.orEmpty()
         }
-        return xml.replace(Regex("</w:p>"), "\\n")
+        return xml.replace(Regex("</w:p>"), "\n")
             .replace(Regex("<[^>]+>"), "")
             .replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
             .trim()
@@ -584,23 +618,35 @@ class ZipWorkspaceManager(private val context: Context) {
 
     private fun ByteArray.toHexString(): String = joinToString("") { byte -> "%02x".format(byte) }
 
-    /** Exports one or more imported workspaces to a shareable ZIP in cache storage. */
+    /** Exports selected versions without trusting a caller-supplied filesystem path. */
     fun exportWorkspaces(workspaceIds: List<String>, archiveName: String): File {
         require(workspaceIds.isNotEmpty()) { "Select at least one workspace" }
-        val output = File(context.cacheDir, "${archiveName.ifBlank { "Salar-Salvia-golden" }}.zip")
-        ZipOutputStream(output.outputStream().buffered()).use { zip ->
-            workspaceIds.distinct().forEach { id ->
-                val root = File(workspacesDir, id)
-                require(root.exists()) { "Workspace is no longer available" }
-                root.walkTopDown().filter { it.isFile }.forEach { file ->
-                    val relative = file.relativeTo(root).invariantSeparatorsPath
-                    val entry = "$id/$relative"
-                    zip.putNextEntry(ZipEntry(entry))
-                    file.inputStream().buffered().use { it.copyTo(zip) }
-                    zip.closeEntry()
+        val safeName = archiveName.take(40).replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .trim('.').ifBlank { "workspace" }
+        val output = File.createTempFile("sali-$safeName-", ".zip", context.cacheDir)
+        try {
+            ZipOutputStream(output.outputStream().buffered()).use { zip ->
+                workspaceIds.distinct().forEach { id ->
+                    // IDs are generated UUIDs, not paths from UI/database records.
+                    require(runCatching { UUID.fromString(id) }.isSuccess) { "Invalid workspace ID" }
+                    val root = File(workspacesDir, id)
+                    require(root.isDirectory) { "Workspace is no longer available" }
+                    val canonicalRoot = root.canonicalFile.toPath()
+                    root.walkTopDown().filter { it.isFile }.forEach { file ->
+                        require(file.canonicalFile.toPath().startsWith(canonicalRoot)) {
+                            "File escapes workspace during export"
+                        }
+                        val relative = file.relativeTo(root).invariantSeparatorsPath
+                        zip.putNextEntry(ZipEntry("$id/$relative"))
+                        file.inputStream().buffered().use { it.copyTo(zip) }
+                        zip.closeEntry()
+                    }
                 }
             }
+            return output
+        } catch (error: Exception) {
+            output.delete()
+            throw error
         }
-        return output
     }
 }
